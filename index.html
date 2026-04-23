@@ -22,7 +22,6 @@
         .reload-warning { color: #ff4444; animation: blink 1s infinite; display: none; font-size: 18px; margin-top: 5px;}
         @keyframes blink { 0% {opacity: 1;} 50% {opacity: 0;} 100% {opacity: 1;} }
 
-        /* Новые стили для интерфейса (Здоровье и Пауза) */
         #health-display { position: absolute; bottom: 30px; left: 30px; display: flex; gap: 5px; }
         .heart { font-size: 32px; color: #ff4444; position: relative; line-height: 1; text-shadow: 2px 2px 0 #000; }
         .heart.empty { color: #444; }
@@ -42,13 +41,12 @@
         <h1>DEAD BLOOD II</h1>
         <div class="instructions">
             <b>ИНДИ-ВЫЖИВАНИЕ В ПУСТОШАХ</b><br><br>
-            <b>WASD</b> - Перемещение | <b>Мышь</b> - Прицел | <b>ЛКМ</b> - Огонь | <b>R</b> - Перезарядка | <b>P</b> - Пауза<br>
+            <b>WASD</b> - Перемещение | <b>Мышь</b> - Прицел | <b>Зажать ЛКМ</b> - Авто-огонь | <b>R</b> - Перезарядка<br>
             <i>Разрушайте окружение, отбивайтесь от орд, собирайте патроны.</i>
         </div>
         <button id="start-btn">В БОЙ</button>
     </div>
 
-    <!-- Новые экраны -->
     <div id="pause-screen" class="overlay-screen">
         <h2>ПАУЗА</h2>
         <button id="resume-btn">Продолжить</button>
@@ -72,14 +70,12 @@
             <div id="reload-warn" class="reload-warning">ПЕРЕЗАРЯДКА! (R)</div>
         </div>
         
-        <!-- Панель здоровья -->
         <div id="health-display" class="hud-panel">
             <div class="heart">❤</div>
             <div class="heart">❤</div>
             <div class="heart">❤</div>
         </div>
         
-        <!-- Кнопка паузы -->
         <button id="pause-btn">||</button>
     </div>
     
@@ -97,6 +93,7 @@
         let targetPoint = new THREE.Vector3();
         let raycaster = new THREE.Raycaster();
         let groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        let isMouseDown = false; // Для авто-огня
         
         const bullets = [];
         const enemies = [];
@@ -121,10 +118,10 @@
         let zombiesKilledTotal = 0;
         let nextDropKillCount = Math.floor(Math.random() * 11) + 10;
         
-        // Новые переменные
-        let health = 6; // 6 половинок = 3 сердечка
+        let health = 6; 
         let invulnTimer = 0;
         let isPaused = false;
+        let walkTimer = 0; // Для звуков шагов
         
         const chunkSize = 40;
         const activeChunks = new Map();
@@ -137,13 +134,86 @@
         const zombieCountText = document.getElementById('zombie-count');
         const scoreText = document.getElementById('score');
         const crosshair = document.getElementById('crosshair');
-        
-        // Новые ссылки UI
         const heartsUI = document.querySelectorAll('#health-display .heart');
         const pauseScreen = document.getElementById('pause-screen');
         const gameOverScreen = document.getElementById('game-over-screen');
 
-        // --- Глобальные материалы (Военная база и сглаживание) ---
+        // --- Аудиосистема (Синтез звуков) ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let noiseBuffer;
+
+        function initAudio() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            // Создаем буфер белого шума для выстрелов и взрывов
+            const bufferSize = audioCtx.sampleRate * 2;
+            noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                output[i] = Math.random() * 2 - 1;
+            }
+        }
+
+        function playSound(type) {
+            if (!noiseBuffer || audioCtx.state === 'suspended') return;
+            const time = audioCtx.currentTime;
+            
+            if (type === 'shoot') {
+                const noiseSrc = audioCtx.createBufferSource();
+                noiseSrc.buffer = noiseBuffer;
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'highpass'; filter.frequency.value = 1000;
+                const gain = audioCtx.createGain();
+                noiseSrc.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+                gain.gain.setValueAtTime(0.4, time);
+                gain.gain.exponentialRampToValueAtTime(0.01, time + 0.1);
+                noiseSrc.start(time); noiseSrc.stop(time + 0.1);
+            } 
+            else if (type === 'empty') {
+                const osc = audioCtx.createOscillator();
+                osc.type = 'square'; osc.frequency.setValueAtTime(800, time);
+                const gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                gain.gain.setValueAtTime(0.2, time);
+                gain.gain.exponentialRampToValueAtTime(0.01, time + 0.05);
+                osc.start(time); osc.stop(time + 0.05);
+            } 
+            else if (type === 'kill') {
+                const osc = audioCtx.createOscillator();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(150, time);
+                osc.frequency.exponentialRampToValueAtTime(40, time + 0.3); // Падение высоты тона
+                const gain = audioCtx.createGain();
+                osc.connect(gain); gain.connect(audioCtx.destination);
+                gain.gain.setValueAtTime(0.3, time);
+                gain.gain.exponentialRampToValueAtTime(0.01, time + 0.3);
+                osc.start(time); osc.stop(time + 0.3);
+            } 
+            else if (type === 'destroy') {
+                const noiseSrc = audioCtx.createBufferSource();
+                noiseSrc.buffer = noiseBuffer;
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'lowpass'; filter.frequency.value = 600;
+                const gain = audioCtx.createGain();
+                noiseSrc.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+                gain.gain.setValueAtTime(0.6, time);
+                gain.gain.exponentialRampToValueAtTime(0.01, time + 0.4);
+                noiseSrc.start(time); noiseSrc.stop(time + 0.4);
+            } 
+            else if (type === 'footstep') {
+                const noiseSrc = audioCtx.createBufferSource();
+                noiseSrc.buffer = noiseBuffer;
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'bandpass'; filter.frequency.value = 300;
+                const gain = audioCtx.createGain();
+                noiseSrc.connect(filter); filter.connect(gain); gain.connect(audioCtx.destination);
+                gain.gain.setValueAtTime(0.08, time);
+                gain.gain.exponentialRampToValueAtTime(0.01, time + 0.05);
+                noiseSrc.start(time); noiseSrc.stop(time + 0.05);
+            }
+        }
+
+        // --- Глобальные материалы ---
         const mats = {
             yellow: new THREE.MeshStandardMaterial({ color: 0xffcc00, roughness: 0.5, flatShading: false }),
             blackRubber: new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.9, flatShading: false }),
@@ -214,7 +284,10 @@
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('keyup', onKeyUp);
             document.addEventListener('mousemove', onMouseMove);
+            
+            // Новые обработчики для авто-огня
             document.addEventListener('mousedown', onMouseDown);
+            document.addEventListener('mouseup', onMouseUp);
             
             document.getElementById('start-btn').addEventListener('click', startGame);
             document.getElementById('pause-btn').addEventListener('click', togglePause);
@@ -227,7 +300,6 @@
         function createPlayer() {
             player = new THREE.Group();
             
-            // ИСПОЛЬЗУЕМ СГЛАЖЕННЫЕ ЦИЛИНДРЫ ВМЕСТО КАПСУЛ ДЛЯ СОВМЕСТИМОСТИ
             const bodyGeo = new THREE.CylinderGeometry(0.3, 0.3, 1.0, 16);
             const body = new THREE.Mesh(bodyGeo, mats.yellow);
             body.position.y = 0.6;
@@ -525,8 +597,6 @@
             activeChunks.set(`${cx},${cz}`, objects);
         }
 
-        // --- Лут и Эффекты ---
-        
         function spawnLoot(x, z) {
             const drop = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.15, 0.6), new THREE.MeshStandardMaterial({color: 0x22cc22, metalness:0.5}));
             drop.position.set(x, 0.1, z);
@@ -555,28 +625,38 @@
             if (e.code === 'KeyP') togglePause();
         }
         function onKeyUp(e) { keys[e.code] = false; }
+        
         function onMouseMove(e) {
             mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
             mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
             crosshair.style.left = e.clientX + 'px';
             crosshair.style.top = e.clientY + 'px';
         }
-        function onMouseDown(e) { if (e.button === 0 && isPlaying) shoot(); }
+        
+        // Обработчики зажатия мыши
+        function onMouseDown(e) { 
+            if (e.button === 0 && isPlaying) isMouseDown = true; 
+        }
+        function onMouseUp(e) { 
+            if (e.button === 0) isMouseDown = false; 
+        }
 
         function startGame() {
             document.getElementById('start-screen').style.display = 'none';
             crosshair.style.display = 'block';
             isPlaying = true;
             document.body.style.cursor = 'none'; 
+            
+            initAudio(); // Инициализируем аудио при первом клике пользователя
+            
             updateHUD();
             updateHealthUI();
         }
 
-        // --- Новые механики (Пауза и Здоровье) ---
-        
         function togglePause() {
             if (!isPlaying || health <= 0) return;
             isPaused = !isPaused;
+            isMouseDown = false; // Сбрасываем стрельбу при паузе
             if (isPaused) {
                 pauseScreen.style.display = 'flex';
                 document.body.style.cursor = 'auto';
@@ -592,7 +672,6 @@
             for (let i = 0; i < 3; i++) {
                 heartsUI[i].className = 'heart'; 
                 if (health >= (i + 1) * 2) {
-                    
                 } else if (health === (i + 1) * 2 - 1) {
                     heartsUI[i].classList.add('half');
                 } else {
@@ -603,6 +682,7 @@
 
         function gameOver() {
             isPlaying = false;
+            isMouseDown = false;
             document.body.style.cursor = 'auto';
             crosshair.style.display = 'none';
             gameOverScreen.style.display = 'flex';
@@ -618,13 +698,14 @@
 
             if (ammo > 0) {
                 ammo--; lastShootTime = time; updateHUD();
+                
+                playSound('shoot'); // Звук выстрела
 
                 const bullet = new THREE.Mesh(
                     new THREE.SphereGeometry(0.08, 4, 4), 
                     new THREE.MeshBasicMaterial({color: 0xffdd00})
                 );
                 bullet.scale.set(1, 1, 8); 
-                
                 bullet.rotation.y = playerBody.rotation.y;
 
                 const gunOffset = new THREE.Vector3(0.3, 0.85, 1.6);
@@ -637,8 +718,11 @@
                 scene.add(bullet);
                 bullets.push(bullet);
             } else {
+                if (time - lastShootTime >= fireRate) {
+                    playSound('empty'); // Звук пустой обоймы
+                    lastShootTime = time;
+                }
                 reloadWarn.style.display = 'block';
-                reload();
             }
         }
 
@@ -656,6 +740,7 @@
             createParticleExplosion(pos, color, 4);
             
             if (obj.userData.hp <= 0) {
+                playSound('destroy'); // Звук разрушения препятствия
                 scene.remove(obj); obstacles.splice(index, 1);
                 for (const [key, chunkData] of activeChunks.entries()) {
                     const i = chunkData.indexOf(obj);
@@ -695,6 +780,11 @@
         function update(dt) {
             if (!isPlaying || isPaused) return;
 
+            // Обработка зажатой кнопки мыши для авто-огня
+            if (isMouseDown) {
+                shoot();
+            }
+
             if (invulnTimer > 0) {
                 invulnTimer -= dt;
                 player.visible = Math.floor(invulnTimer * 10) % 2 === 0;
@@ -704,16 +794,24 @@
 
             const moveDir = new THREE.Vector3(0, 0, 0);
             
-            // Назначаем точные векторы для изометрической проекции экрана
-            if (keys['KeyW']) { moveDir.x += 1; moveDir.z -= 1; } // Вверх по экрану
-            if (keys['KeyS']) { moveDir.x -= 1; moveDir.z += 1; } // Вниз по экрану
-            if (keys['KeyA']) { moveDir.x -= 1; moveDir.z -= 1; } // Влево по экрану
-            if (keys['KeyD']) { moveDir.x += 1; moveDir.z += 1; } // Вправо по экрану
+            if (keys['KeyW']) { moveDir.x += 1; moveDir.z -= 1; } 
+            if (keys['KeyS']) { moveDir.x -= 1; moveDir.z += 1; } 
+            if (keys['KeyA']) { moveDir.x -= 1; moveDir.z -= 1; } 
+            if (keys['KeyD']) { moveDir.x += 1; moveDir.z += 1; } 
 
             if (moveDir.length() > 0) {
                 moveDir.normalize();
                 const newPos = player.position.clone().add(moveDir.multiplyScalar(playerSpeed * dt));
-                if (!checkObstacleCollision(newPos, 0.4)) player.position.copy(newPos);
+                if (!checkObstacleCollision(newPos, 0.4)) {
+                    player.position.copy(newPos);
+                    
+                    // Звуки шагов
+                    walkTimer -= dt;
+                    if (walkTimer <= 0) {
+                        playSound('footstep');
+                        walkTimer = 0.25; // Интервал между шагами
+                    }
+                }
             }
 
             raycaster.setFromCamera(mouse, camera);
@@ -740,6 +838,7 @@
                         e.userData.hp--;
                         createParticleExplosion(b.position, 0x880000, 6);
                         if (e.userData.hp <= 0) {
+                            playSound('kill'); // Звук убийства
                             scene.remove(e); enemies.splice(j, 1);
                             zombiesAlive--; score += 15; zombiesKilledTotal++;
                             if (zombiesKilledTotal >= nextDropKillCount) {
